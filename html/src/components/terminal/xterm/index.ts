@@ -101,6 +101,7 @@ export class Xterm {
     private reconnect = true;
     private doReconnect = true;
     private closeOnDisconnect = false;
+    private audio: HTMLAudioElement;
 
     private writeFunc = (data: ArrayBuffer) => this.writeData(new Uint8Array(data));
 
@@ -191,7 +192,7 @@ export class Xterm {
 
     @bind
     private initListeners() {
-        const { terminal, fitAddon, overlayAddon, register, sendData } = this;
+        const { terminal, fitAddon, overlayAddon, register, sendData, Bell } = this;
         register(
             terminal.onTitleChange(data => {
                 if (data && data !== '' && !this.titleFixed) {
@@ -200,6 +201,11 @@ export class Xterm {
             })
         );
         register(terminal.onData(data => sendData(data)));
+        register(
+            terminal.onBell(() => {
+                Bell();
+            })
+        );
         register(terminal.onBinary(data => sendData(Uint8Array.from(data, v => v.charCodeAt(0)))));
         register(
             terminal.onResize(({ cols, rows }) => {
@@ -221,6 +227,11 @@ export class Xterm {
         );
         register(addEventListener(window, 'resize', () => fitAddon.fit()));
         register(addEventListener(window, 'beforeunload', this.onWindowUnload));
+    }
+
+    @bind
+    public Bell() {
+        this.audio.play();
     }
 
     @bind
@@ -267,6 +278,7 @@ export class Xterm {
     @bind
     public connect() {
         this.socket = new WebSocket(this.options.wsUrl, ['tty']);
+        this.audio = new Audio('Bell.mp3');
         const { socket, register } = this;
 
         socket.binaryType = 'arraybuffer';
