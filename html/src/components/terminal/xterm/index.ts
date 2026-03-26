@@ -167,6 +167,26 @@ export class Xterm {
 
         terminal.open(parent);
         fitAddon.fit();
+
+        terminal.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+            if (ev.type !== 'keydown') return true;
+
+            // Cmd+K / Ctrl+K → Clear terminal
+            if (ev.key === 'k' && (ev.metaKey || ev.ctrlKey)) {
+                ev.preventDefault();
+                terminal.clear();
+                return false;
+            }
+
+            // Shift+Enter → Line break (newline without executing)
+            if (ev.key === 'Enter' && ev.shiftKey) {
+                ev.preventDefault();
+                terminal.input('\n');
+                return false;
+            }
+
+            return true;
+        });
     }
 
     @bind
