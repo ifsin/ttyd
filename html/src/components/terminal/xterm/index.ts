@@ -196,7 +196,7 @@ export class Xterm {
         register(
             terminal.onTitleChange(data => {
                 if (data && data !== '' && !this.titleFixed) {
-                    document.title = data + ' | ' + this.title;
+                    document.title = this.title ? data + ' | ' + this.title : data;
                 }
             })
         );

@@ -17,14 +17,12 @@ static char initial_cmds[] = {SET_WINDOW_TITLE, SET_PREFERENCES};
 static int send_initial_message(struct lws *wsi, int index) {
   unsigned char message[LWS_PRE + 1 + 4096];
   unsigned char *p = &message[LWS_PRE];
-  char buffer[128];
   int n = 0;
 
   char cmd = initial_cmds[index];
   switch (cmd) {
     case SET_WINDOW_TITLE:
-      gethostname(buffer, sizeof(buffer) - 1);
-      n = snprintf((char *)p, 1 + 4096, "%c%s (%s)", cmd, server->command, buffer);
+      n = snprintf((char *)p, 1 + 4096, "%c", cmd);
       break;
     case SET_PREFERENCES:
       n = snprintf((char *)p, 1 + 4096, "%c%s", cmd, server->prefs_json);
