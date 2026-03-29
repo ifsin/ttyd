@@ -68,43 +68,42 @@ static bool check_host_origin(struct lws *wsi) {
   return len > 0 && strcasecmp(buf, host_buf) == 0;
 }
 
-static pty_ctx_t *pty_ctx_init(struct pss_tty *pss) {
-  pty_ctx_t *ctx = xmalloc(sizeof(pty_ctx_t));
-  ctx->pss = pss;
-  ctx->ws_closed = false;
-  return ctx;
-}
-
-static void pty_ctx_free(pty_ctx_t *ctx) { free(ctx); }
-
 static void process_read_cb(pty_process *process, pty_buf_t *buf, bool eof) {
-  pty_ctx_t *ctx = (pty_ctx_t *)process->ctx;
-  if (ctx->ws_closed) {
+  session_t *session = (session_t *)process->ctx;
+  if (session->detached) {
     pty_buf_free(buf);
     return;
   }
 
   if (eof && !process_running(process))
-    ctx->pss->lws_close_status = process->exit_code == 0 ? 1000 : 1006;
+    session->pss->lws_close_status = process->exit_code == 0 ? 1000 : 1006;
   else
-    ctx->pss->pty_buf = buf;
-  lws_callback_on_writable(ctx->pss->wsi);
+    session->pss->pty_buf = buf;
+  lws_callback_on_writable(session->pss->wsi);
 }
 
 static void process_exit_cb(pty_process *process) {
-  pty_ctx_t *ctx = (pty_ctx_t *)process->ctx;
-  if (ctx->ws_closed) {
+  session_t *session = (session_t *)process->ctx;
+  struct pss_tty *pss = session->pss;
+  if (session->detached) {
     lwsl_notice("process killed with signal %d, pid: %d\n", process->exit_signal, process->pid);
+    if (pss != NULL) pss->session = NULL;
     goto done;
   }
 
   lwsl_notice("process exited with code %d, pid: %d\n", process->exit_code, process->pid);
-  ctx->pss->process = NULL;
-  ctx->pss->lws_close_status = process->exit_code == 0 ? 1000 : 1006;
-  lws_callback_on_writable(ctx->pss->wsi);
+  session->pss->process = NULL;
+  session->pss->session = NULL;
+  session->pss->lws_close_status = process->exit_code == 0 ? 1000 : 1006;
+  lws_callback_on_writable(session->pss->wsi);
 
 done:
-  pty_ctx_free(ctx);
+  session_remove(session);
+  if (session->timer != NULL) {
+    uv_timer_stop(session->timer);
+    uv_close((uv_handle_t *)session->timer, (uv_close_cb)free);
+  }
+  free(session);
 
   // if we are going to exit, do it now.
   if (force_exit) exit(0);
@@ -149,18 +148,25 @@ static char **build_env(struct pss_tty *pss) {
   return envp;
 }
 
-static bool spawn_process(struct pss_tty *pss, uint16_t columns, uint16_t rows) {
-  pty_process *process = process_init((void *)pty_ctx_init(pss), server->loop, build_args(pss), build_env(pss));
+static bool spawn_process(struct pss_tty *pss, const char *session_id, uint16_t columns, uint16_t rows) {
+  pty_process *process = process_init(NULL, server->loop, build_args(pss), build_env(pss));
+  session_t *session = session_create(session_id, process, pss);
+  process->ctx = (void *)session;
   if (server->cwd != NULL) process->cwd = strdup(server->cwd);
   if (columns > 0) process->columns = columns;
   if (rows > 0) process->rows = rows;
   if (pty_spawn(process, process_read_cb, process_exit_cb) != 0) {
     lwsl_err("pty_spawn: %d (%s)\n", errno, strerror(errno));
+    uv_close((uv_handle_t *)session->timer, (uv_close_cb)free);
     process_free(process);
+    free(session);
     return false;
   }
   lwsl_notice("started process, pid: %d\n", process->pid);
   pss->process = process;
+  pss->session = session;
+  strncpy(pss->session_id, session_id, SESSION_ID_LEN - 1);
+  pss->session_id[SESSION_ID_LEN - 1] = '\0';
   lws_callback_on_writable(pss->wsi);
 
   return true;
@@ -194,6 +200,13 @@ static bool check_auth(struct lws *wsi, struct pss_tty *pss) {
   }
 
   return true;
+}
+
+static void attach_session(struct pss_tty *pss, session_t *session) {
+  session_attach(session, pss);
+  pss->process = session->process;
+  pss->session = session;
+  lws_callback_on_writable(pss->wsi);
 }
 
 int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
@@ -233,8 +246,11 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
     case LWS_CALLBACK_ESTABLISHED:
       pss->initialized = false;
       pss->authenticated = false;
+      pss->intentional_close = false;
       pss->wsi = wsi;
       pss->lws_close_status = LWS_CLOSE_STATUS_NOSTATUS;
+      pss->session = NULL;
+      pss->session_id[0] = '\0';
 
       if (server->url_arg) {
         while (lws_hdr_copy_fragment(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_URI_ARGS, n++) > 0) {
@@ -327,6 +343,9 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
         case RESUME:
           pty_resume(pss->process);
           break;
+        case QUIT:
+          pss->intentional_close = true;
+          break;
         case JSON_DATA:
           if (pss->process != NULL) break;
           uint16_t columns = 0;
@@ -347,8 +366,33 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
               return -1;
             }
           }
+
+          struct json_object *sid = NULL;
+          const char *client_session_id = NULL;
+          if (json_object_object_get_ex(obj, "sessionId", &sid))
+            client_session_id = json_object_get_string(sid);
+
+          if (client_session_id == NULL || strlen(client_session_id) != 36) {
+            lwsl_err("missing or invalid sessionId in client message\n");
+            json_object_put(obj);
+            return -1;
+          }
+
+          session_t *existing = session_find(client_session_id);
+          if (existing != NULL && existing->detached && process_running(existing->process)) {
+            lwsl_notice("session %s reconnected\n", client_session_id);
+            json_object_put(obj);
+            attach_session(pss, existing);
+            break;
+          }
+
+          if (!spawn_process(pss, client_session_id, columns, rows)) {
+            json_object_put(obj);
+            return 1;
+          }
+
           json_object_put(obj);
-          if (!spawn_process(pss, columns, rows)) return 1;
+
           break;
         default:
           lwsl_warn("ignored unknown message type: %c\n", command);
@@ -372,9 +416,16 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
         free(pss->args[i]);
       }
 
-      if (pss->process != NULL) {
-        ((pty_ctx_t *)pss->process->ctx)->ws_closed = true;
-        if (process_running(pss->process)) {
+      if (pss->process != NULL && process_running(pss->process)) {
+        if (pss->session != NULL) {
+          if (pss->intentional_close) {
+            session_stop(pss->session);
+          } else {
+            lwsl_notice("detaching session %s for client %s\n", pss->session_id, pss->address);
+            session_detach(pss->session);
+          }
+          pss->session = NULL;
+        } else {
           pty_pause(pss->process);
           lwsl_notice("killing process, pid: %d\n", pss->process->pid);
           pty_kill(pss->process, server->sig_code);

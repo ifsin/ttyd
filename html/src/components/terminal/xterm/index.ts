@@ -34,6 +34,7 @@ enum Command {
     RESIZE_TERMINAL = '1',
     PAUSE = '2',
     RESUME = '3',
+    QUIT = '4',
 }
 type Preferences = ITerminalOptions & ClientOptions;
 
@@ -94,6 +95,7 @@ export class Xterm {
 
     private socket?: WebSocket;
     private token: string;
+    private sessionId: string;
     private opened = false;
     private title?: string;
     private titleFixed?: string;
@@ -105,10 +107,16 @@ export class Xterm {
 
     private writeFunc = (data: ArrayBuffer) => this.writeData(new Uint8Array(data));
 
+    private static generateSessionId(): string {
+        return crypto.randomUUID();
+    }
+
     constructor(
         private options: XtermOptions,
         private sendCb: () => void
-    ) {}
+    ) {
+        this.sessionId = Xterm.generateSessionId();
+    }
 
     dispose() {
         for (const d of this.disposables) {
@@ -150,6 +158,13 @@ export class Xterm {
             return message;
         }
         return undefined;
+    }
+
+    @bind
+    private onWindowUnloadConfirmed() {
+        if (this.socket?.readyState === WebSocket.OPEN) {
+            this.socket.send(this.textEncoder.encode(Command.QUIT));
+        }
     }
 
     @bind
@@ -227,6 +242,7 @@ export class Xterm {
         );
         register(addEventListener(window, 'resize', () => fitAddon.fit()));
         register(addEventListener(window, 'beforeunload', this.onWindowUnload));
+        register(addEventListener(window, 'unload', this.onWindowUnloadConfirmed));
     }
 
     @bind
@@ -293,7 +309,12 @@ export class Xterm {
         console.log('[ttyd] websocket connection opened');
 
         const { textEncoder, terminal, overlayAddon } = this;
-        const msg = JSON.stringify({ AuthToken: this.token, columns: terminal.cols, rows: terminal.rows });
+        const msg = JSON.stringify({
+            AuthToken: this.token,
+            columns: terminal.cols,
+            rows: terminal.rows,
+            sessionId: this.sessionId,
+        });
         this.socket?.send(textEncoder.encode(msg));
 
         if (this.opened) {

@@ -9,6 +9,7 @@
 #define RESIZE_TERMINAL '1'
 #define PAUSE '2'
 #define RESUME '3'
+#define QUIT '4'
 #define JSON_DATA '{'
 
 // server message
@@ -37,6 +38,20 @@ struct pss_http {
   size_t len;
 };
 
+#define SESSION_TIMEOUT_MS 10000
+#define SESSION_ID_LEN 37
+
+struct pss_tty;
+
+typedef struct session {
+  char id[SESSION_ID_LEN];
+  pty_process *process;
+  struct pss_tty *pss;
+  uv_timer_t *timer;
+  bool detached;
+  struct session *next;
+} session_t;
+
 struct pss_tty {
   bool initialized;
   int initial_cmd_index;
@@ -46,6 +61,7 @@ struct pss_tty {
   char path[128];
   char **args;
   int argc;
+  char session_id[SESSION_ID_LEN];
 
   struct lws *wsi;
   char *buffer;
@@ -53,14 +69,11 @@ struct pss_tty {
 
   pty_process *process;
   pty_buf_t *pty_buf;
+  session_t *session;
 
   int lws_close_status;
+  bool intentional_close;
 };
-
-typedef struct {
-  struct pss_tty *pss;
-  bool ws_closed;
-} pty_ctx_t;
 
 struct server {
   int client_count;        // client count
@@ -85,4 +98,12 @@ struct server {
   char terminal_type[30];  // terminal type to report
 
   uv_loop_t *loop;         // the libuv event loop
+  session_t *sessions;     // linked list of detached sessions
 };
+
+session_t *session_find(const char *id);
+session_t *session_create(const char *id, pty_process *process, struct pss_tty *pss);
+void session_detach(session_t *session);
+void session_attach(session_t *session, struct pss_tty *pss);
+void session_remove(session_t *session);
+void session_stop(session_t *session);

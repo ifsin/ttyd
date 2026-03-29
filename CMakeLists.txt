@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.12.0)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-project(ttyd VERSION 1.8.1 LANGUAGES C)
+project(ttyd VERSION 1.8.2 LANGUAGES C)
 
 set(TTYD_VERSION "${PROJECT_VERSION}")
 
@@ -33,7 +33,7 @@ else()
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _GNU_SOURCE)
 endif()
 
-set(SOURCE_FILES src/utils.c src/pty.c src/protocol.c src/http.c src/server.c)
+set(SOURCE_FILES src/utils.c src/pty.c src/session.c src/protocol.c src/http.c src/server.c)
 
 include(FindPackageHandleStandardArgs)
 
